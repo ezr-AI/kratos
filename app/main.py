@@ -18,13 +18,75 @@ def pick_file() -> str | None:
     return path or None
 
 
-def _dtype_limits(dtype) -> tuple[float, float] | None:
-    if np.issubdtype(dtype, np.integer):
-        info = np.iinfo(dtype)
-        return float(info.min), float(info.max)
-    if np.issubdtype(dtype, np.floating):
+def _quick_percentiles_from_overview(path: str) -> tuple[float, float] | None:
+    with rasterio.open(path) as src:
+        factors = src.overviews(1)
+        if factors:
+            level = max(factors)
+            scale = 1 / level
+            out_height = max(1, int(src.height * scale))
+            out_width = max(1, int(src.width * scale))
+            sample = src.read(
+                1,
+                out_shape=(out_height, out_width),
+                resampling=Resampling.average,
+            ).astype(np.float32)
+        else:
+            scale = 512 / max(src.width, src.height)
+            out_height = max(1, int(src.height * scale))
+            out_width = max(1, int(src.width * scale))
+            sample = src.read(
+                1,
+                out_shape=(out_height, out_width),
+                resampling=Resampling.average,
+            ).astype(np.float32)
+    sample = sample[np.isfinite(sample)]
+    if sample.size == 0:
         return None
-    return None
+    p2 = float(np.percentile(sample, 2))
+    p98 = float(np.percentile(sample, 98))
+    return p2, p98
+
+
+def _build_multiscale_from_overviews(path: str, chunks: dict):
+    with rasterio.open(path) as src:
+        factors = src.overviews(1)
+    if not factors:
+        return None
+    levels = sorted(factors)
+    pyramid = []
+
+    # Full-res as dask (RAM friendly)
+    try:
+        full = rxr.open_rasterio(
+            path,
+            chunks=chunks,
+            masked=False,
+            cache=False,
+        )
+        pyramid.append(full)
+    except Exception:
+        pass
+
+    # Overviews as in-memory arrays (small, stable)
+    for level in levels:
+        try:
+            with rasterio.open(path, overview_level=level) as src:
+                data = src.read()
+            pyramid.append(data)
+        except Exception:
+            continue
+
+    if not pyramid:
+        return None
+    return pyramid
+
+
+def _build_multiscale_coarsen(da, factors):
+    pyramid = [da]
+    for f in factors:
+        pyramid.append(da.coarsen(y=f, x=f, boundary="trim").mean())
+    return pyramid
 
 
 def open_raster(path: str, preview_scale: float):
@@ -42,26 +104,51 @@ def open_raster(path: str, preview_scale: float):
         return data, {"channel_axis": 0}
 
     # Full-res lazy loading with dask (tile-based, RAM-friendly)
-    da = rxr.open_rasterio(
-        path,
-        chunks={"x": 1024, "y": 1024},
-        masked=False,
-        cache=False,
-    )
-    # Use .data to keep it lazy (dask array)
-    data = da.data
-
+    chunks = {"x": 512, "y": 512}
+    pyramid = _build_multiscale_from_overviews(path, chunks)
+    if pyramid is None:
+        da = rxr.open_rasterio(
+            path,
+            chunks=chunks,
+            masked=False,
+            cache=False,
+        )
+        pyramid = _build_multiscale_coarsen(da, [2, 4, 8, 16, 32, 64])
     opts: dict = {}
-    limits = _dtype_limits(da.dtype)
+    first = pyramid[0]
+    is_xarray = hasattr(first, "dims")
+    if is_xarray and "band" in first.dims and first.rio.count in (3, 4):
+        converted = []
+        # First level may be xarray (dask)
+        converted.append(first.transpose("y", "x", "band").data)
+        for p in pyramid[1:]:
+            if isinstance(p, np.ndarray):
+                # numpy array in (band, y, x)
+                converted.append(np.transpose(p, (1, 2, 0)))
+            else:
+                converted.append(p.transpose("y", "x", "band").data)
+        pyramid = converted
+        opts["rgb"] = True
+        opts["multiscale"] = True
+        return pyramid, opts
+
+    # Single band
+    converted = []
+    if is_xarray:
+        converted.append(first.isel(band=0).data)
+    elif isinstance(first, np.ndarray):
+        converted.append(first[0])
+    for p in pyramid[1:]:
+        if isinstance(p, np.ndarray):
+            converted.append(p[0])
+        else:
+            converted.append(p.isel(band=0).data)
+    pyramid = converted
+    opts["multiscale"] = True
+    limits = _quick_percentiles_from_overview(path)
     if limits:
         opts["contrast_limits"] = limits
-
-    if "band" in da.dims and da.rio.count in (3, 4):
-        data = da.transpose("y", "x", "band").data
-        opts["rgb"] = True
-    else:
-        opts["channel_axis"] = 0
-    return data, opts
+    return pyramid, opts
 
 
 def main() -> int:
@@ -75,13 +162,17 @@ def main() -> int:
     preview_scale = float(os.environ.get("PREVIEW_SCALE", "1.0"))
     data, opts = open_raster(path, preview_scale)
     viewer = napari.Viewer(title=f"Palm GeoTIFF Viewer - {Path(path).name}")
-    viewer.add_image(
+    layer = viewer.add_image(
         data,
         name=Path(path).name,
         contrast_limits=opts.get("contrast_limits"),
         rgb=opts.get("rgb", False),
-        channel_axis=opts.get("channel_axis"),
+        multiscale=opts.get("multiscale", False),
     )
+    try:
+        layer.interpolation = "linear"
+    except Exception:
+        pass
     napari.run()
     return 0
 
