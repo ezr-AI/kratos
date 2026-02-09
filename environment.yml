@@ -1,0 +1,11 @@
+name: palm-viewer
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - gdal
+  - rasterio
+  - rioxarray
+  - dask
+  - napari
+  - pyqt
