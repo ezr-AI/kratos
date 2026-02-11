@@ -89,7 +89,7 @@ def _build_multiscale_coarsen(da, factors):
     return pyramid
 
 
-def open_raster(path: str, preview_scale: float):
+def open_raster(path: str, preview_scale: float, use_full_res: bool):
     if preview_scale < 1.0:
         with rasterio.open(path) as src:
             out_height = max(1, int(src.height * preview_scale))
@@ -115,12 +115,21 @@ def open_raster(path: str, preview_scale: float):
         )
         pyramid = _build_multiscale_coarsen(da, [2, 4, 8, 16, 32, 64])
     opts: dict = {}
+    # Optionally drop full-res level for speed (like QGIS uses overviews)
+    if not use_full_res and len(pyramid) > 1:
+        pyramid = pyramid[1:]
+
     first = pyramid[0]
     is_xarray = hasattr(first, "dims")
-    if is_xarray and "band" in first.dims and first.rio.count in (3, 4):
+    if (is_xarray and "band" in first.dims and first.rio.count in (3, 4)) or (
+        isinstance(first, np.ndarray) and first.ndim == 3 and first.shape[0] in (3, 4)
+    ):
         converted = []
         # First level may be xarray (dask)
-        converted.append(first.transpose("y", "x", "band").data)
+        if is_xarray:
+            converted.append(first.transpose("y", "x", "band").data)
+        else:
+            converted.append(np.transpose(first, (1, 2, 0)))
         for p in pyramid[1:]:
             if isinstance(p, np.ndarray):
                 # numpy array in (band, y, x)
@@ -160,7 +169,8 @@ def main() -> int:
         return 1
 
     preview_scale = float(os.environ.get("PREVIEW_SCALE", "1.0"))
-    data, opts = open_raster(path, preview_scale)
+    use_full_res = os.environ.get("USE_FULL_RES", "1") == "1"
+    data, opts = open_raster(path, preview_scale, use_full_res)
     viewer = napari.Viewer(title=f"Palm GeoTIFF Viewer - {Path(path).name}")
     layer = viewer.add_image(
         data,

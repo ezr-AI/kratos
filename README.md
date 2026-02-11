@@ -1,20 +1,16 @@
-# Palm GeoTIFF Desktop Viewer
+# Palm QGIS Lite (PyQGIS)
 
-Desktop viewer sederhana untuk GeoTIFF besar dengan pan & zoom.
-Menggunakan napari + rasterio (lazy loading via dask).
-
-## Setup
-```powershell
-conda env create -f environment.yml
-```
+Desktop viewer berbasis QGIS engine asli (render cepat, RAM hemat).
 
 ## Jalankan
-```powershell
-run.bat
+1. Pastikan QGIS 3.40.13 terpasang di `C:\Program Files\QGIS 3.40.13`
+2. Jalankan:
+```
+qgis_app\run_qgis_app.bat
 ```
 
-Atau langsung:
-```powershell
-conda activate palm-viewer
-python app\main.py "C:\Users\ACER\Documents\O7.tif"
-```
+## Fitur
+- Open GeoTIFF
+- Open KML/GeoJSON/SHP/GPKG
+- Layer panel
+- Clear layers

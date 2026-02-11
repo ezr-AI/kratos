@@ -1,0 +1,70 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual env / Conda local env folders
+.venv/
+venv/
+env/
+.env
+
+# Logs / temp
+*.log
+*.tmp
+*.temp
+*.cache
+
+# Build / package artifacts
+dist/
+build/
+node_modules/
+.vite/
+
+# ML models / weights / checkpoints
+*.pt
+*.pth
+*.onnx
+*.engine
+weights/
+checkpoints/
+runs/
+
+# Geospatial data and sidecars (runtime/input/output)
+*.tif
+*.tiff
+*.tfw
+*.ovr
+*.aux.xml
+*.kml
+*.kmz
+*.geojson
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+
+# Project-specific generated files
+qgis_app/yolo_detect.log
+server/uploads/
+server/data/
+
+# Training datasets
+trainingsawit/
