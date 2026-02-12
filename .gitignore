@@ -4,6 +4,8 @@ Thumbs.db
 desktop.ini
 .idea/
 .vscode/
+*.swp
+*.swo
 
 # Python
 __pycache__/
@@ -17,6 +19,7 @@ __pycache__/
 .coverage
 .coverage.*
 htmlcov/
+.ipynb_checkpoints/
 
 # Virtual env / Conda local env folders
 .venv/
@@ -60,6 +63,8 @@ runs/
 *.dbf
 *.prj
 *.cpg
+*.qgs
+*.qgz
 
 # Project-specific generated files
 qgis_app/yolo_detect.log

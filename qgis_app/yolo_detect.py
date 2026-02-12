@@ -50,7 +50,7 @@ def _read_tile_rgb(src, x, y, w, h):
     return data
 
 
-def _detect_ultralytics(image, model_path, conf, iou):
+def _init_ultralytics_detector(model_path):
     try:
         from ultralytics import YOLO
     except Exception as exc:
@@ -61,9 +61,29 @@ def _detect_ultralytics(image, model_path, conf, iou):
     model_path = str(model_path)
     is_onnx = model_path.lower().endswith(".onnx")
     if is_onnx:
-        return _detect_onnx(image, model_path, conf, iou)
+        import onnxruntime as ort
+
+        session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        input_name = session.get_inputs()[0].name
+        input_shape = session.get_inputs()[0].shape
+        in_h, in_w = int(input_shape[2]), int(input_shape[3])
+        return {
+            "type": "onnx",
+            "session": session,
+            "input_name": input_name,
+            "in_h": in_h,
+            "in_w": in_w,
+        }
 
     model = YOLO(model_path)
+    return {"type": "ultra", "model": model}
+
+
+def _detect_ultralytics(image, detector, conf, iou):
+    if detector["type"] == "onnx":
+        return _detect_onnx(image, detector, conf, iou)
+
+    model = detector["model"]
     results = model.predict(image, conf=conf, iou=iou, verbose=False)
     dets = []
     for r in results:
@@ -76,15 +96,14 @@ def _detect_ultralytics(image, model_path, conf, iou):
     return dets
 
 
-def _detect_onnx(image, model_path, conf, iou):
+def _detect_onnx(image, detector, conf, iou):
     import cv2
-    import onnxruntime as ort
 
     h, w = image.shape[:2]
-    session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
-    input_name = session.get_inputs()[0].name
-    input_shape = session.get_inputs()[0].shape
-    in_h, in_w = int(input_shape[2]), int(input_shape[3])
+    session = detector["session"]
+    input_name = detector["input_name"]
+    in_h = detector["in_h"]
+    in_w = detector["in_w"]
 
     resized = cv2.resize(image, (in_w, in_h), interpolation=cv2.INTER_LINEAR)
     inp = resized.astype(np.float32) / 255.0
@@ -200,17 +219,28 @@ def main():
     ap.add_argument("--overlap", type=int, default=128)
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--iou", type=float, default=0.45)
+    ap.add_argument("--edge-buffer", type=int, default=10)
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
     image_path = Path(args.image)
     model_path = Path(args.model)
     config_path = Path(args.config) if args.config else None
+    print("STATUS Initializing detector...", flush=True)
+    detector = None
+    if not (config_path and config_path.exists()):
+        detector = _init_ultralytics_detector(str(model_path))
 
     detections_global = []
     with rasterio.open(image_path) as src:
         img_w, img_h = src.width, src.height
-        for x, y, w, h in _iter_windows(src.width, src.height, args.tile, args.overlap):
+        windows = list(_iter_windows(src.width, src.height, args.tile, args.overlap))
+        total = len(windows)
+        for idx, (x, y, w, h) in enumerate(windows, start=1):
+            print(f"PROGRESS {idx}/{total}", flush=True)
+            window = rasterio.windows.Window(x, y, w, h)
+            # Valid-data mask: 0 = nodata, >0 = valid
+            valid_mask = src.dataset_mask(window=window)
             # Avoid duplicate detections from overlapping tiles by keeping only
             # centers inside the inner tile region.
             margin = max(0, args.overlap // 2)
@@ -231,9 +261,7 @@ def main():
                         {
                             "height": h,
                             "width": w,
-                            "transform": src.window_transform(
-                                rasterio.windows.Window(x, y, w, h)
-                            ),
+                            "transform": src.window_transform(window),
                             "count": 3,
                             "dtype": "uint8",
                         }
@@ -246,13 +274,29 @@ def main():
             else:
                 rgb = _read_tile_rgb(src, x, y, w, h)
                 detections = _detect_ultralytics(
-                    rgb, str(model_path), args.conf, args.iou
+                    rgb, detector, args.conf, args.iou
                 )
 
                 # Map detections to global coords
                 for (x1, y1, x2, y2), score in detections:
                     cx = (x1 + x2) / 2.0
                     cy = (y1 + y2) / 2.0
+                    # Keep only detections whose center lies on valid raster data.
+                    cxi = int(round(cx))
+                    cyi = int(round(cy))
+                    if cxi < 0 or cyi < 0 or cxi >= w or cyi >= h:
+                        continue
+                    if valid_mask[cyi, cxi] == 0:
+                        continue
+                    # Reject detections too close to nodata edge.
+                    eb = max(0, int(args.edge_buffer))
+                    if eb > 0:
+                        x0 = max(0, cxi - eb)
+                        y0 = max(0, cyi - eb)
+                        x1 = min(w, cxi + eb + 1)
+                        y1 = min(h, cyi + eb + 1)
+                        if valid_mask[y0:y1, x0:x1].min() == 0:
+                            continue
                     gx = x + cx
                     gy = y + cy
                     # Keep only centers inside inner region (or on image borders)
@@ -270,12 +314,12 @@ def main():
         deduped = _dedupe_points(detections_global, radius=max(3, args.overlap // 4))
         features = []
         for gx, gy, score in deduped:
-            lon, lat = src.transform * (gx, gy)
+            x, y = src.transform * (gx, gy)
             features.append(
                 {
                     "type": "Feature",
-                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                    "properties": {"score": score},
+                    "geometry": {"type": "Point", "coordinates": [float(x), float(y)]},
+                    "properties": {"score": float(score)},
                 }
             )
 
